@@ -1,6 +1,11 @@
 import streamlit as st
 import time
 
+def stream_text(text):
+    for char in text:
+        yield char
+        time.sleep(0.02)
+
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
@@ -42,9 +47,13 @@ if text_input:
 
     time.sleep(1)
 
-    ai_response = "FUCK THUNDERATZ"
+    ai_response = "A THUNDERATZ <3<3<3"
 
-    st.session_state["messages"].append({"role": "assistant", "content": ai_response, "avatar": "ai"})
+    st.session_state["messages"].append({
+        "role": "assistant",
+        "content": ai_response,
+        "avatar": "ai"
+    })
 
     ai = st.chat_message("assistant", avatar="ai")
-    ai.write(ai_response)
+    ai.write_stream(stream_text(ai_response))
