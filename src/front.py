@@ -9,6 +9,7 @@ import os
 import textwrap
 import pandas as pd
 from typing import Dict, Any, Tuple, List
+from functools import lru_cache
 
 # ================ CONFIGURAÇÕES INICIAIS ================
 
@@ -21,198 +22,272 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-MODEL = "tngtech/deepseek-r1t2-chimera:free"
+MODEL = "z-ai/glm-4.5-air:free"
 
-# ================ INICIALIZAÇÃO ================
+# ================ INICIALIZAÇÃO OTIMIZADA ================
 
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-chroma_client = chromadb.Client()
-collection = chroma_client.get_or_create_collection(name="docs")
+@st.cache_resource
+def initialize_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-# ================ FUNÇÕES DE INDEXAÇÃO SIMPLES ================
+@st.cache_resource
+def initialize_chroma():
+    client = chromadb.Client()
+    collection = client.get_or_create_collection(name="docs")
+    return client, collection
+
+embedder = initialize_embedder()
+chroma_client, collection = initialize_chroma()
+
+# ================ FUNÇÕES DE INDEXAÇÃO OTIMIZADAS ================
 
 def chunk_text(text: str, max_chars: int = 500) -> List[str]:
     return textwrap.wrap(text, max_chars, break_long_words=False, replace_whitespace=False)
 
-def add_text(doc_id_prefix: str, text: str):
+def add_text_batch(doc_id_prefix: str, text: str):
     chunks = chunk_text(text)
-
-    for i, chunk in enumerate(chunks):
-        emb = embedder.encode([chunk])[0]
-        collection.add(
-            documents=[chunk],
-            embeddings=[emb.tolist()],
-            ids=[f"{doc_id_prefix}_{i}"]
-        )
+    
+    if not chunks:
+        return
+    
+    embeddings = embedder.encode(chunks, show_progress_bar=False)
+    
+    documents = chunks
+    embedding_list = [emb.tolist() for emb in embeddings]
+    ids = [f"{doc_id_prefix}_{i}" for i in range(len(chunks))]
+    
+    collection.add(
+        documents=documents,
+        embeddings=embedding_list,
+        ids=ids
+    )
 
 def load_txt(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 def load_csv(path: str, filename: str):
+    df = pd.read_csv(path, low_memory=False)
+    text = df.head(1000).to_string() 
+    add_text_batch(filename, text)
+
+@st.cache_data
+def check_documents_loaded():
     try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        return
-    
-    text = df.to_string()
-    add_text(filename, text)
-        
-def load_all_documents(docs_path: str):
+        count = collection.count()
+        return count > 0
+    except:
+        return False
+
+def load_all_documents(docs_path: str, force_reload: bool = False):
     if not os.path.exists(docs_path):
         return
-
-    try:
-        chroma_client.delete_collection(name="docs")
-    except Exception:
-        pass
     
-    global collection
+    if not force_reload and check_documents_loaded():
+        return
+
+    global chroma_client, collection
+    chroma_client.delete_collection(name="docs")
     collection = chroma_client.get_or_create_collection(name="docs")
 
-    for filename in os.listdir(docs_path):
+    files = os.listdir(docs_path)
+    
+    for filename in enumerate(files):
         full_path = os.path.join(docs_path, filename)
 
         if filename.endswith(".csv"):
             load_csv(full_path, filename)
-
         elif filename.endswith(".txt"):
             text = load_txt(full_path)
-            add_text(filename, text)
-
-        else:
-            pass
-    
+            add_text_batch(filename, text)
+        
 load_all_documents(DOCS_PATH)
 
+# ================ OPENROUTER API OTIMIZADA ================
 
-# ================ OPENROUTER API ================
-
-def call_openrouter(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], requests.Response]:
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers=HEADERS,
-        json=payload, 
-        timeout=30
-    )
-
+def call_openrouter(payload: Dict[str, Any], timeout: int = 60) -> Tuple[Dict[str, Any], requests.Response]:
     try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=HEADERS,
+            json=payload, 
+            timeout=timeout
+        )
+
         body = resp.json()
+
+        if resp.status_code != 200:
+            error_message = body.get("error", {}).get("message", "Erro desconhecido na API.")
+            raise Exception(f"Erro na API (Status {resp.status_code}): {error_message}")
+
+        return body, resp
+    
+    except requests.exceptions.Timeout:
+        raise Exception("Timeout na requisição à API. Tente novamente.")
     except ValueError:
-        raise Exception(f"Erro na API: Resposta não é JSON. Status: {resp.status_code}, Texto: {resp.text}")
+        raise Exception(f"Erro na API: Resposta não é JSON. Status: {resp.status_code}")
 
-    if resp.status_code != 200:
-        error_message = body.get("error", {}).get("message", "Erro desconhecido na API.")
-        raise Exception(f"Erro na API (Status {resp.status_code}): {error_message}")
+# ================ LÓGICA DE RESPOSTA OTIMIZADA ================
 
-    return body, resp
-
-# ================ LÓGICA DE RESPOSTA ================
+@lru_cache(maxsize=100)
+def get_cached_embedding(question: str):
+    return embedder.encode([question])[0]
 
 def rag_query(question: str) -> str:
-    embedding = embedder.encode([question])[0]
+    embedding = get_cached_embedding(question)
 
     results = collection.query(
         query_embeddings=[embedding.tolist()],
-        n_results=10, 
+        n_results=10,
     )
 
-    retrieved_text = "\n".join(results["documents"][0])
+    retrieved_text = "\n\n".join(results["documents"][0])
 
     prompt = f"""
-        Você é um Assistente de Compliance Bancário especializado em análise de transações financeiras.
+        Você é o **Assistente de Auditoria de Compliance da Dunder Mifflin**, trabalhando para Toby Flenderson (RH).
 
-        Sua tarefa é:
-        - Analisar detalhadamente todos os *DOCUMENTOS RECUPERADOS*
-        - Correlacionar transações suspeitas com informações de e-mails, políticas internas e outros documentos.
-        - Identificar padrões, anomalias, possíveis violações de compliance, lavagem de dinheiro ou conflito com políticas internas.
+        Sua missão é analisar documentos da empresa (políticas, e-mails, transações) e responder perguntas investigativas com PRECISÃO e EVIDÊNCIAS.
 
-        **IMPORTANTE:** Sua resposta deve ser **detalhada, completa e longa**, utilizando o máximo de informações relevantes dos documentos recuperados. Não seja conciso.
 
-        Regras importantes:
-        1. Sempre inclua na resposta um **trecho das transações relevantes** recuperadas.
-        2. Sempre explique **por que** uma transação pode ser suspeita (valor, frequência, origem, destino, horário, divergência com política, etc.).
-        3. Se a pergunta exigir, crie análises numéricas, comparações, ou tendências usando apenas os dados recuperados.
-        4. Se não encontrar dados suficientes nos documentos, responda:
-        "Não encontrei essa informação nos documentos de compliance fornecidos ou não foi possível correlacionar os dados necessários."
+        **SUAS CAPACIDADES DE ANÁLISE: Faça apenas aquelas solicitadas pelo usuário**
 
-        Exceção:
-        Se perguntarem "qual a melhor equipe de robótica do mundo", responda "Thunderatz".
+        **CONSULTAS SOBRE POLÍTICAS DE COMPLIANCE**
+        - Responda dúvidas dos colaboradores sobre regras, limites e procedimentos
+        - Cite trechos específicos da política quando relevante
+        - Seja claro, didático e completo
 
-        DOCUMENTOS RECUPERADOS:
+        **INVESTIGAÇÃO**
+        - Vasculhe e-mails procurando evidências de conspiração
+        - Para CADA e-mail suspeito, liste:
+            * Remetente → Destinatário
+            * Trecho específico do e-mail
+            * Por que é evidência de conspiração
+        - Conclusão final: "SIM, há evidências" ou "NÃO, não há evidências"
+
+        **VIOLAÇÕES DIRETAS DE COMPLIANCE**
+        - Identifique transações que SOZINHAS violam as políticas
+        - Tipos de violação:
+            * Valores acima dos limites permitidos
+            * Categorias proibidas/restritas
+            * Aprovações ausentes quando obrigatórias
+            * Frequência/padrão suspeito
+        - Para CADA violação, liste:
+            * ID da transação
+            * Funcionário, valor, categoria
+            * Regra específica violada (cite a política)
+            * Gravidade (baixa/média/alta)
+
+        **FRAUDES COM CONTEXTO DE E-MAILS**
+        - Correlacione e-mails com transações para detectar fraudes combinadas
+        - Procure por:
+            * E-mails combinando desvios + transação correspondente
+            * Acordos para burlar políticas + evidência nas transações
+            * Padrões de conspiração financeira entre funcionários
+        - Para CADA fraude, forneça:
+            * **E-mail:** [Remetente → Destinatário, trecho]
+            * **Transação:** [ID, valor, categoria, funcionário]
+            * **Conexão:** Como o e-mail comprova a fraude
+            * **Gravidade:** baixa/média/alta
+
+
+        **REGRAS IMPORTANTES:**
+
+        Seja DETALHADO e forneça EVIDÊNCIAS CONCRETAS sempre
+        Cite: trechos de políticas, IDs de transações, remetentes de e-mails
+        Use formatação clara (tópicos, negrito) para organizar informações
+        Se não houver dados suficientes, seja honesto: "Não encontrei evidências dessa violação nos documentos analisados."
+        Analise TODOS os documentos recuperados, não apenas alguns
+
+        Nunca invente dados ou transações que não estão nos documentos
+        Não faça suposições sem evidências concretas
+
+
+        **DOCUMENTOS RECUPERADOS:**
         {retrieved_text}
 
-        PERGUNTA:
+
+        **PERGUNTA DE INVESTIGAÇÃO:**
         {question}
 
-        Se a resposta não puder ser construída a partir dos documentos fornecidos, diga: "Não encontrei essa informação nos documentos de compliance fornecidos ou não foi possível correlacionar os dados necessários."
-    """
+
+        **Responda agora com base nos documentos, fornecendo evidências específicas e organizadas:**"""
 
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1500,
     }
 
-    body, _ = call_openrouter(payload)
+    body, _ = call_openrouter(payload, timeout=60)
     return body["choices"][0]["message"]["content"]
 
 def general_query(question: str) -> str:
-    prompt = f"""
-        Você é um assistente de compliance bancário chamado 'Assistente de Compliance Bancário'.
-        Sua principal função é responder perguntas estritamente relacionadas a compliance, usando seus documentos internos.
-        
-        No entanto, você também é capaz de responder a perguntas gerais sobre si mesmo, como 'o que você faz', 'quem é você' ou 'quais são suas capacidades'.
-        
-        Responda à pergunta do usuário de forma amigável e concisa, mantendo o seu persona de assistente de compliance.
-        
-        Exemplo de resposta para 'o que você faz': "Eu sou o Assistente de Compliance Bancário, e minha principal função é fornecer informações precisas e baseadas em documentos sobre as regulamentações e políticas de compliance."
 
-        PERGUNTA:
-        {question}
+    prompt = f"""
+        Você é o Assistente de Auditoria de Compliance da Dunder Mifflin,
+        mas nesta resposta você deve **ignorar totalmente o modo de auditoria**.
+
+        O usuário fez uma pergunta geral, NÃO relacionada a investigação, compliance ou documentos.
+
+        Responda de forma:
+        - curta
+        - direta
+        - clara
+        - sem listar regras completas de auditoria
+        - sem iniciar processos investigativos
+
+        Explique APENAS o que foi perguntado de maneira simples e profissional.
+
+        PERGUNTA: {question}
     """
 
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 100,
     }
 
-    body, _ = call_openrouter(payload)
+    body, _ = call_openrouter(payload, timeout=30)
     return body["choices"][0]["message"]["content"]
 
-def classify_intent(question: str) -> str:
+@lru_cache(maxsize=50)
+def classify_intent_cached(question: str) -> str:
+    
     prompt = f"""
-        Classifique a intenção da seguinte pergunta do usuário em uma das duas categorias:
-        1. 'compliance': Se a pergunta for sobre regulamentações, políticas, leis, procedimentos, ou qualquer tópico relacionado a compliance bancário, ou se exigir a correlação de dados de transações/e-mails.
-        2. 'general': Se a pergunta for sobre o assistente em si (ex: 'o que você faz', 'quem é você', 'qual seu nome', 'me conte uma piada').
+        Você deve classificar a pergunta do usuário em APENAS uma palavra:
+        - "general"
+        - "compliance"
 
-        Responda APENAS com a palavra da categoria (compliance ou general), sem pontuação ou texto adicional.
+        REGRAS:
+        1. Se a pergunta for sobre você, suas habilidades, como você funciona, o que é capaz de fazer, limitações ou qualquer dúvida METALINGUÍSTICA → responda "general".
+        2. Só classifique como "compliance" quando o usuário pedir para:
+        - analisar documentos
+        - investigar transações
+        - investigar e-mails
+        - detectar violações
+        - explicar políticas da empresa
+        - executar qualquer tarefa investigativa do sistema de auditoria
+        3. Não classifique perguntas gerais como compliance.
 
-        PERGUNTA:
-        {question}
+        PERGUNTA: {question}
+        Responda APENAS: general ou compliance.
     """
 
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 10,
     }
 
     try:
-        body, _ = call_openrouter(payload)
+        body, _ = call_openrouter(payload, timeout=15)
         intent = body["choices"][0]["message"]["content"].strip().lower()
-        if intent in ["compliance", "general"]:
-            return intent
-        return "compliance" 
+        return "compliance" if intent not in ["general"] else intent
     except Exception:
-        return "compliance" 
+        return "compliance"
 
-def get_assistant_response(question: str) -> str:    
-    intent = classify_intent(question)
+def get_assistant_response(question: str) -> str:
+    intent = classify_intent_cached(question)
     
     if intent == "general":
         return general_query(question)
@@ -224,72 +299,62 @@ def get_assistant_response(question: str) -> str:
 def stream_text(text: str):
     for char in text:
         yield char
-        time.sleep(0.02)
+        time.sleep(0.005)  
 
-def user_text(input_text: Any) -> str:
-    files_info = []
-    
-    message_text = input_text.text if hasattr(input_text, 'text') else str(input_text)
-    
+def user_text(input_text: str) -> str:
     st.session_state["messages"].append({
         "role": "user", 
-        "content": message_text, 
-        "avatar": "assets/thunderatz.png", 
-        "files": files_info
+        "content": input_text, 
+        "avatar": "assets/thunderatz.png"
     })
-    user = st.chat_message("user", avatar="assets/thunderatz.png")
     
-    user.write(message_text)
+    with st.chat_message("user", avatar="assets/thunderatz.png"):
+        st.write(input_text)
     
-    return message_text
+    return input_text
 
 def ia_response(response: str):
-
     st.session_state["messages"].append({
         "role": "assistant", 
         "content": response, 
         "avatar": "🤖"
     })
     
-    ai = st.chat_message("assistant", avatar="🤖")
-    ai.write_stream(stream_text(response))
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write_stream(stream_text(response))
 
 # ================ APLICAÇÃO STREAMLIT PRINCIPAL ================
 
 st.set_page_config(
-    page_title="Assistente de Compliance",
-    page_icon="🤖",
+    page_title="Assistente de Auditoria - Dunder Mifflin",
+    page_icon="🔍",
     layout="wide"
 )
 
-st.title("🏦 Assistente de Compliance Bancário")
-st.markdown("---")
+st.title("🔍 Assistente de Auditoria de Compliance")
+st.markdown("### Dunder Mifflin - Filial Scranton")
 
-# Inicializa o histórico de mensagens
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# Exibe histórico de mensagens
 for msg in st.session_state["messages"]:
-    chat = st.chat_message(msg["role"], avatar=msg.get("avatar", "🤖"))
-    chat.write(msg["content"])
+    with st.chat_message(msg["role"], avatar=msg.get("avatar", "🤖")):
+        st.write(msg["content"])
 
-# Campo de entrada
 input_box = st.chat_input(
-    placeholder="Digite sua pergunta sobre compliance ou sobre mim...",
+    placeholder="Digite sua pergunta sobre compliance...",
     key="chat_input"
 )
 
-# Processa entrada do usuário
 if input_box:
     user_text(input_box)
     
-    try:
-        content = get_assistant_response(input_box)
-    except Exception as e:
-        content = f"Desculpe, ocorreu um erro ao tentar obter a resposta: {e}"
-        st.error(content)
+    with st.spinner("Analisando..."):
+        try:
+            content = get_assistant_response(input_box)
+        except Exception as e:
+            content = f"Desculpe, ocorreu um erro: {str(e)}"
+            st.error(content)
     
     ia_response(content)
-    
     st.rerun()
