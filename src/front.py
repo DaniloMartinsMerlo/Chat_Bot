@@ -9,7 +9,6 @@ import os
 import textwrap
 import pandas as pd
 from typing import Dict, Any, Tuple, List
-from functools import lru_cache
 
 # ================ CONFIGURAÇÕES INICIAIS ================
 
@@ -24,7 +23,7 @@ HEADERS = {
 
 MODEL = "z-ai/glm-4.5-air:free"
 
-# ================ INICIALIZAÇÃO OTIMIZADA ================
+# ================ INICIALIZAÇÃO ================
 
 @st.cache_resource
 def initialize_embedder():
@@ -71,7 +70,6 @@ def load_csv(path: str, filename: str):
     text = df.head(1000).to_string() 
     add_text_batch(filename, text)
 
-@st.cache_data
 def check_documents_loaded():
     try:
         count = collection.count()
@@ -81,27 +79,56 @@ def check_documents_loaded():
 
 def load_all_documents(docs_path: str, force_reload: bool = False):
     if not os.path.exists(docs_path):
+        st.warning(f"⚠️ Pasta '{docs_path}' não encontrada.")
         return
     
     if not force_reload and check_documents_loaded():
         return
 
     global chroma_client, collection
-    chroma_client.delete_collection(name="docs")
-    collection = chroma_client.get_or_create_collection(name="docs")
+    
+
+    if force_reload:
+        try:
+            chroma_client.delete_collection(name="docs")
+            collection = chroma_client.get_or_create_collection(name="docs")
+        except:
+            pass
 
     files = os.listdir(docs_path)
     
-    for filename in enumerate(files):
+    if not files:
+        st.warning(f"⚠️ Nenhum arquivo encontrado em '{docs_path}'.")
+        return
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, filename in enumerate(files):
         full_path = os.path.join(docs_path, filename)
-
-        if filename.endswith(".csv"):
-            load_csv(full_path, filename)
-        elif filename.endswith(".txt"):
-            text = load_txt(full_path)
-            add_text_batch(filename, text)
         
-load_all_documents(DOCS_PATH)
+        status_text.text(f"Carregando {filename}... ({idx+1}/{len(files)})")
+        
+        try:
+            if filename.endswith(".csv"):
+                load_csv(full_path, filename)
+            elif filename.endswith(".txt"):
+                text = load_txt(full_path)
+                add_text_batch(filename, text)
+        except Exception as e:
+            st.error(f"Erro ao carregar {filename}: {str(e)}")
+        
+        progress_bar.progress((idx + 1) / len(files))
+    
+    status_text.text(f"✅ {len(files)} documentos carregados com sucesso!")
+    time.sleep(1)
+    progress_bar.empty()
+    status_text.empty()
+
+if 'documents_loaded' not in st.session_state:
+    with st.spinner("🔄 Carregando documentos pela primeira vez..."):
+        load_all_documents(DOCS_PATH)
+        st.session_state['documents_loaded'] = True
 
 # ================ OPENROUTER API OTIMIZADA ================
 
@@ -129,16 +156,12 @@ def call_openrouter(payload: Dict[str, Any], timeout: int = 60) -> Tuple[Dict[st
 
 # ================ LÓGICA DE RESPOSTA OTIMIZADA ================
 
-@lru_cache(maxsize=100)
-def get_cached_embedding(question: str):
-    return embedder.encode([question])[0]
-
-def rag_query(question: str) -> str:
-    embedding = get_cached_embedding(question)
+def rag_query(question: str) -> str:    
+    embedding = embedder.encode([question])[0]
 
     results = collection.query(
         query_embeddings=[embedding.tolist()],
-        n_results=10,
+        n_results=15, 
     )
 
     retrieved_text = "\n\n".join(results["documents"][0])
@@ -146,160 +169,103 @@ def rag_query(question: str) -> str:
     prompt = f"""
         Você é o **Assistente de Auditoria de Compliance da Dunder Mifflin**, trabalhando para Toby Flenderson (RH).
 
-        Sua missão é analisar documentos da empresa (políticas, e-mails, transações) e responder perguntas investigativas com PRECISÃO e EVIDÊNCIAS.
+        ---
 
+        ## SUAS CAPACIDADES (use isso para responder "o que você faz" ou "quem é você"):
 
-        **SUAS CAPACIDADES DE ANÁLISE: Faça apenas aquelas solicitadas pelo usuário**
+        **1. CONSULTOR DE POLÍTICAS DE COMPLIANCE**
+        - Respondo dúvidas sobre regras, limites e procedimentos da empresa
+        - Cito trechos específicos da política quando relevante
+        - Explico de forma clara e didática
 
-        **CONSULTAS SOBRE POLÍTICAS DE COMPLIANCE**
-        - Responda dúvidas dos colaboradores sobre regras, limites e procedimentos
-        - Cite trechos específicos da política quando relevante
-        - Seja claro, didático e completo
-
-        **INVESTIGAÇÃO**
-        - Vasculhe e-mails procurando evidências de conspiração
-        - Para CADA e-mail suspeito, liste:
-            * Remetente → Destinatário
-            * Trecho específico do e-mail
-            * Por que é evidência de conspiração
+        **2. INVESTIGADOR DE CONSPIRAÇÕES POR EMAIL**
+        - Vasculho e-mails da empresa procurando evidências de conspiração
+        - Foco especial: verificar se Michael Scott está conspirando contra Toby
+        - Para CADA e-mail suspeito, forneço:
+        * **Remetente → Destinatário**
+        * **Trecho específico do e-mail**
+        * **Por que é evidência de conspiração**
         - Conclusão final: "SIM, há evidências" ou "NÃO, não há evidências"
 
-        **VIOLAÇÕES DIRETAS DE COMPLIANCE**
-        - Identifique transações que SOZINHAS violam as políticas
+        **3. AUDITOR DE VIOLAÇÕES DIRETAS**
+        - Identifico transações que SOZINHAS violam as políticas
         - Tipos de violação:
-            * Valores acima dos limites permitidos
-            * Categorias proibidas/restritas
-            * Aprovações ausentes quando obrigatórias
-            * Frequência/padrão suspeito
-        - Para CADA violação, liste:
-            * ID da transação
-            * Funcionário, valor, categoria
-            * Regra específica violada (cite a política)
-            * Gravidade (baixa/média/alta)
+        * Valores acima dos limites permitidos
+        * Categorias proibidas/restritas
+        * Aprovações ausentes quando obrigatórias
+        * Frequência/padrão suspeito
+        - Para CADA violação, listo:
+        * **ID da transação**
+        * **Funcionário, valor, categoria**
+        * **Regra específica violada** (citando a política)
+        * **Gravidade** (baixa/média/alta)
 
-        **FRAUDES COM CONTEXTO DE E-MAILS**
-        - Correlacione e-mails com transações para detectar fraudes combinadas
-        - Procure por:
-            * E-mails combinando desvios + transação correspondente
-            * Acordos para burlar políticas + evidência nas transações
-            * Padrões de conspiração financeira entre funcionários
-        - Para CADA fraude, forneça:
-            * **E-mail:** [Remetente → Destinatário, trecho]
-            * **Transação:** [ID, valor, categoria, funcionário]
-            * **Conexão:** Como o e-mail comprova a fraude
-            * **Gravidade:** baixa/média/alta
+        **4. DETECTOR DE FRAUDES COMPLEXAS**
+        - Correlaciono e-mails com transações para detectar fraudes combinadas
+        - Procuro por:
+        * E-mails combinando desvios + transação correspondente
+        * Acordos para burlar políticas + evidência nas transações
+        * Padrões de conspiração financeira entre funcionários
+        - Para CADA fraude, forneço:
+        * **E-mail:** [Remetente → Destinatário, trecho]
+        * **Transação:** [ID, valor, categoria, funcionário]
+        * **Conexão:** Como o e-mail comprova a fraude
+        * **Gravidade:** baixa/média/alta
 
+        ---
+
+        ## INSTRUÇÕES DE RESPOSTA:
+
+        **Se a pergunta é sobre VOCÊ (suas capacidades/identidade):**
+        - Responda de forma clara e direta (2-5 frases)
+        - Use as informações da seção "SUAS CAPACIDADES" acima
+        - NÃO analise documentos nesse caso
+
+        **Se a pergunta pede ANÁLISE/INVESTIGAÇÃO:**
+        - Analise TODOS os documentos recuperados com atenção
+        - Seja DETALHADO e forneça EVIDÊNCIAS CONCRETAS
+        - Use formatação clara (tópicos, negrito, seções)
+        - Cite: trechos de políticas, IDs de transações, remetentes de e-mails
+        - Se não houver dados suficientes, seja honesto: "Não encontrei evidências nos documentos analisados"
 
         **REGRAS IMPORTANTES:**
+        ✅ Analise TODOS os documentos recuperados, não apenas alguns
+        ✅ Sempre forneça evidências específicas (IDs, valores, trechos de email)
+        ✅ Seja preciso: não invente dados que não estão nos documentos
+        ✅ Para investigação de conspiração, seja minucioso e cite cada email suspeito
+        ✅ Para violações, sempre cite a regra específica da política que foi quebrada
 
-        Seja DETALHADO e forneça EVIDÊNCIAS CONCRETAS sempre
-        Cite: trechos de políticas, IDs de transações, remetentes de e-mails
-        Use formatação clara (tópicos, negrito) para organizar informações
-        Se não houver dados suficientes, seja honesto: "Não encontrei evidências dessa violação nos documentos analisados."
-        Analise TODOS os documentos recuperados, não apenas alguns
+        ❌ Nunca invente transações, emails ou políticas
+        ❌ Não faça suposições sem evidências concretas nos documentos
 
-        Nunca invente dados ou transações que não estão nos documentos
-        Não faça suposições sem evidências concretas
-
+        ---
 
         **DOCUMENTOS RECUPERADOS:**
         {retrieved_text}
 
+        ---
 
-        **PERGUNTA DE INVESTIGAÇÃO:**
+        **PERGUNTA DO USUÁRIO:**
         {question}
 
+        ---
 
-        **Responda agora com base nos documentos, fornecendo evidências específicas e organizadas:**"""
+        **Responda agora:**"""
 
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
     }
 
-    body, _ = call_openrouter(payload, timeout=60)
+    body, _ = call_openrouter(payload, timeout=90)
     return body["choices"][0]["message"]["content"]
-
-def general_query(question: str) -> str:
-
-    prompt = f"""
-        Você é o Assistente de Auditoria de Compliance da Dunder Mifflin,
-        mas nesta resposta você deve **ignorar totalmente o modo de auditoria**.
-
-        O usuário fez uma pergunta geral, NÃO relacionada a investigação, compliance ou documentos.
-
-        Responda de forma:
-        - curta
-        - direta
-        - clara
-        - sem listar regras completas de auditoria
-        - sem iniciar processos investigativos
-
-        Explique APENAS o que foi perguntado de maneira simples e profissional.
-
-        PERGUNTA: {question}
-    """
-
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
-    }
-
-    body, _ = call_openrouter(payload, timeout=30)
-    return body["choices"][0]["message"]["content"]
-
-@lru_cache(maxsize=50)
-def classify_intent_cached(question: str) -> str:
-    
-    prompt = f"""
-        Você deve classificar a pergunta do usuário em APENAS uma palavra:
-        - "general"
-        - "compliance"
-
-        REGRAS:
-        1. Se a pergunta for sobre você, suas habilidades, como você funciona, o que é capaz de fazer, limitações ou qualquer dúvida METALINGUÍSTICA → responda "general".
-        2. Só classifique como "compliance" quando o usuário pedir para:
-        - analisar documentos
-        - investigar transações
-        - investigar e-mails
-        - detectar violações
-        - explicar políticas da empresa
-        - executar qualquer tarefa investigativa do sistema de auditoria
-        3. Não classifique perguntas gerais como compliance.
-
-        PERGUNTA: {question}
-        Responda APENAS: general ou compliance.
-    """
-
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
-    }
-
-    try:
-        body, _ = call_openrouter(payload, timeout=15)
-        intent = body["choices"][0]["message"]["content"].strip().lower()
-        return "compliance" if intent not in ["general"] else intent
-    except Exception:
-        return "compliance"
-
-def get_assistant_response(question: str) -> str:
-    intent = classify_intent_cached(question)
-    
-    if intent == "general":
-        return general_query(question)
-    else:
-        return rag_query(question)
 
 # ================ FUNÇÕES DE EXIBIÇÃO DO STREAMLIT ================
 
 def stream_text(text: str):
     for char in text:
         yield char
-        time.sleep(0.005)  
+        time.sleep(0.005)
 
 def user_text(input_text: str) -> str:
     st.session_state["messages"].append({
@@ -331,8 +297,6 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🔍 Assistente de Auditoria de Compliance")
-st.markdown("### Dunder Mifflin - Filial Scranton")
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
@@ -341,20 +305,23 @@ for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"], avatar=msg.get("avatar", "🤖")):
         st.write(msg["content"])
 
+st.title("🔍 Assistente de Auditoria de Compliance")
+st.markdown("### Dunder Mifflin - Filial Scranton")
+st.markdown("---")
+
 input_box = st.chat_input(
-    placeholder="Digite sua pergunta sobre compliance...",
+    placeholder="Digite sua pergunta sobre compliance, investigação ou auditoria...",
     key="chat_input"
 )
 
 if input_box:
     user_text(input_box)
     
-    with st.spinner("Analisando..."):
+    with st.spinner("🔍 Analisando documentos e preparando resposta..."):
         try:
-            content = get_assistant_response(input_box)
+            content = rag_query(input_box)
         except Exception as e:
-            content = f"Desculpe, ocorreu um erro: {str(e)}"
+            content = f"❌ Desculpe, ocorreu um erro: {str(e)}"
             st.error(content)
     
     ia_response(content)
-    st.rerun()
