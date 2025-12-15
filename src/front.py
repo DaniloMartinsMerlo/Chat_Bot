@@ -297,6 +297,9 @@ st.set_page_config(
     layout="wide"
 )
 
+st.title("🔍 Assistente de Auditoria de Compliance")
+st.markdown("### Dunder Mifflin - Filial Scranton")
+st.markdown("---")
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
@@ -305,9 +308,6 @@ for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"], avatar=msg.get("avatar", "🤖")):
         st.write(msg["content"])
 
-st.title("🔍 Assistente de Auditoria de Compliance")
-st.markdown("### Dunder Mifflin - Filial Scranton")
-st.markdown("---")
 
 input_box = st.chat_input(
     placeholder="Digite sua pergunta sobre compliance, investigação ou auditoria...",
