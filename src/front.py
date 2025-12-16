@@ -61,6 +61,49 @@ def add_text_batch(doc_id_prefix: str, text: str):
         ids=ids
     )
 
+def load_emails(path: str, filename: str):
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+
+    separator = "-------------------------------------------------------------------------------"
+    blocks = raw.split(separator)
+
+    documents = []
+    ids = []
+    metadatas = []
+
+    email_index = 0
+
+    for block in blocks:
+        block = block.strip()
+
+        if not block:
+            continue
+
+        document_text = (
+            "EMAIL CORPORATIVO.\n" + block
+        )
+
+        documents.append(document_text)
+        ids.append(f"{filename}_email_{email_index}")
+        metadatas.append({
+            "type": "email"
+        })
+
+        email_index += 1
+
+    if not documents:
+        return
+
+    embeddings = embedder.encode(documents, show_progress_bar=False)
+
+    collection.add(
+        documents=documents,
+        embeddings=[e.tolist() for e in embeddings],
+        ids=ids,
+        metadatas=metadatas
+    )
+
 def load_txt(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
@@ -147,11 +190,16 @@ def load_all_documents(docs_path: str, force_reload: bool = False):
         status_text.text(f"Carregando {filename}... ({idx+1}/{len(files)})")
         
         try:
-            if filename.endswith(".csv"):
+            if filename == "emails.txt":
+                load_emails(full_path, filename)
+
+            elif filename.endswith(".csv"):
                 load_csv(full_path, filename)
+
             elif filename.endswith(".txt"):
                 text = load_txt(full_path)
                 add_text_batch(filename, text)
+    
         except Exception as e:
             st.error(f"Erro ao carregar {filename}: {str(e)}")
         
