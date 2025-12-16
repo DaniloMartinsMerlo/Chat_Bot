@@ -66,9 +66,46 @@ def load_txt(path: str) -> str:
         return f.read()
 
 def load_csv(path: str, filename: str):
-    df = pd.read_csv(path, low_memory=False)
-    text = df.head(1000).to_string() 
-    add_text_batch(filename, text)
+    df = pd.read_csv(path)
+
+    documents = []
+    embeddings = []
+    ids = []
+    metadatas = []
+
+    for _, row in df.iterrows():
+        text = (
+            f"TRANSAÇÃO FINANCEIRA DA EMPRESA.\n"
+            f"ID da transação: {row['id_transacao']}.\n"
+            f"Data: {row['data']}.\n"
+            f"Funcionário: {row['funcionario']}, cargo {row['cargo']}.\n"
+            f"Descrição da despesa: {row['descricao']}.\n"
+            f"Valor da despesa: {row['valor']}.\n"
+            f"Categoria: {row['categoria']}.\n"
+            f"Departamento: {row['departamento']}."
+        )
+
+        documents.append(text)
+        ids.append(f"{filename}_{row['id_transacao']}")
+
+        metadatas.append({
+            "type": "transaction",
+            "transaction_id": row["id_transacao"],
+            "employee": row["funcionario"],
+            "role": row["cargo"],
+            "category": row["categoria"],
+            "department": row["departamento"],
+            "value": float(row["valor"]),
+            "date": row["data"]
+        })
+    embeddings = embedder.encode(documents, show_progress_bar=False)
+
+    collection.add(
+        documents=documents,
+        embeddings=[emb.tolist() for emb in embeddings],
+        ids=ids,
+        metadatas=metadatas
+    )
 
 def check_documents_loaded():
     try:
@@ -130,7 +167,7 @@ if 'documents_loaded' not in st.session_state:
         load_all_documents(DOCS_PATH)
         st.session_state['documents_loaded'] = True
 
-# ================ OPENROUTER API OTIMIZADA ================
+# ================ OPENROUTER API ================
 
 def call_openrouter(payload: Dict[str, Any], timeout: int = 60) -> Tuple[Dict[str, Any], requests.Response]:
     try:
@@ -154,7 +191,7 @@ def call_openrouter(payload: Dict[str, Any], timeout: int = 60) -> Tuple[Dict[st
     except ValueError:
         raise Exception(f"Erro na API: Resposta não é JSON. Status: {resp.status_code}")
 
-# ================ LÓGICA DE RESPOSTA OTIMIZADA ================
+# ================ LÓGICA DE RESPOSTA ================
 
 def rag_query(question: str) -> str:    
     embedding = embedder.encode([question])[0]
