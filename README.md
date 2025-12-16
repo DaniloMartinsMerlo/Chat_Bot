@@ -101,5 +101,8 @@ streamlit run src/front.py
 
 ---
 
-## 🎥 Vídeo de Demonstração
+## 🎥 Vídeos de Demonstração
 
+[Código](https://youtu.be/AOsc3Y7wbPk)
+
+[Demonstração](https://youtu.be/IC0JzM1PaBs)
